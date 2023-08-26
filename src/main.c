@@ -32,104 +32,48 @@
 #include <fcntl.h>
 
 #include "log.h"
-
-#if defined(__GNUC__)
-#	define PRINTF_LIKE(n, m)       __attribute__((format(printf, n, m)))
-#else
-#	define PRINTF_LIKE(n, m)       /* If only */
-#endif  /* __GNUC__ */
-
-#define PROGRAM_NAME "selectserver"
-#define PORT "9909"             /* Port we are listening on. */
-#define MAX_LOG_TEXT 2048       /* Max text length for logging. */
-
-#ifdef  BUFSIZ                  /* Max client response length. */
-#define BUFSIZE BUFSIZ
-#else
-#define BUFSIZE 4096
-#endif
-
-#define LOG_FILE "server.log"
-#define MAX_SLAVES 1022
-#define ARRAY_CARDINALITY(x) (sizeof(x) / sizeof ((x)[0]))
-
-#ifndef NI_MAXHOST
-#define NI_MAXHOST 1025
-#endif
-
-#ifndef NI_MAXSERV
-#define NI_MAXSERV 32
-#endif
-
-#define LOG_MSG(stream, msg, flags) log_msg (stream, msg, flags); \
-											log_msg (0, msg, flags)
-
-/* 
-*	Error codes for get_response().
-*/
-#define SS_NO_MEMORY	0
-#define SS_CLOSE_CONN	1
-#define SS_WOULD_BLOCK	2
+#include "client_info.h"
+#include "err.h"
+#include "internal.h"
+#include "network.h"
 
 /*
 *	Different types of logs.
 */
-static const char *const logs[] = {
-    "%s: We only sent %zu bytes because of a send() error.\n",
-#define SS_SEND_ERROR		0
-    "%s: INFO: Socket %d hung up.",
-#define SS_CLOSED_CONN		1
-    "%s: This server can not handle any more connections at this moment.\n",
-#define	SS_CONN_SURPLUS		2
-    "%s: Couldn't send the peer the full message.\n",
-#define SS_FAILED_EXCUSE 	3
-    "%s: INFO: New connection from HOST:%s, SERVICE:%s,\n\t\t\t\t\t   LOCAL IP ADDRESS:%s, on socket %d.",
-#define SS_NEW_CONN			4
-    "%s: Server overloaded. Caution advised.\n",
-#define SS_OVERLOAD			5
-    "%s: Failed to setup a socket.\n",
-#define SS_SOCKET_ERROR		6
-    "%s: fclose() failed. Logs might have been lost.\n",
-#define SS_FCLOSE_ERROR		7
-    "\n%s:Listening for connections on port %s.\n",
-#define SS_INITIATE			8
-};
-
-/*
-*	A struct to keep track of an IP's state.
-*/
-struct info {
-    char address[INET6_ADDRSTRLEN];
-    int id;
-    int sock;
+const char *const logs[] = {
+    [SS_SEND_ERROR] =
+        "%s: We only sent %zu bytes because of a send() error.\n",
+    [SS_CLOSED_CONN] = 
+        "%s: INFO: Socket %d hung up.",
+    [SS_CONN_SURPLUS] = 
+        "%s: This server can not handle any more connections at this moment.\n",
+    [SS_FAILED_EXCUSE] = 
+        "%s: Couldn't send the peer the full message.\n",
+    [SS_NEW_CONN] =
+        "%s: INFO: New connection from HOST:%s, SERVICE:%s,\n\t\t\t\t\t   LOCAL IP ADDRESS:%s, on socket %d.",
+    [SS_OVERLOAD] =     
+        "%s: Server overloaded. Caution advised.\n",
+    [SS_SOCKET_ERROR] =  
+        "%s: Failed to setup a socket.\n",
+    [SS_FCLOSE_ERROR] =     
+        "%s: fclose() failed. Logs might have been lost.\n",
+    [SS_INITIATE] =     
+        "\n%s:Listening for connections on port %s.\n",
 };
 
 /*
 *	File descriptor set for pipe(). 
 */
-static int pfds[2] = { 0 };
+int pfds[2] = { 0 };
 
 /*
 *	A FILE * for the log file. 
 */
-static FILE *log_fp = 0;
+FILE *log_fp = 0;
 
 static inline int max (int x, int y)
 {
     return x > y ? x : y;
-}
-
-PRINTF_LIKE(3, 4) static void err_ret (FILE *stream, unsigned level, const char *fmt, ...)
-{
-    char buf[BUFSIZE];
-    va_list argp;
-    va_start (argp, fmt);
-
-	if (fmt) {
-    	vsnprintf (buf, sizeof buf, fmt, argp);
-    	LOG_MSG (stream, buf, level);
-	}
-    va_end (argp);
 }
 
 static void sig_handler (int sig)
@@ -192,8 +136,8 @@ static void configure_tcp (int slave_fd)
     }
 }
 
-struct info *ss_search (int size, struct info *p_slaves[size],
-                        struct info *const *ptr, int (*func) (const void *,
+struct client_info *ss_search (int size, struct client_info *p_slaves[size],
+                        struct client_info *const *ptr, int (*func) (const void *,
                                                               const void *))
 {
     for (int i = 0; i < size; i++) {
@@ -204,158 +148,6 @@ struct info *ss_search (int size, struct info *p_slaves[size],
     return 0;
 }
 
-/** 
-*	\brief	Calls send() in a loop to ensure that all data is sent. 
-*	\param	slave_fd - The file descriptor to send to.
-*	\param	len - To store he number of bytes actually sent.
-*	\param	line - A pointer to a line to send.
-*	\return 0 on success, or -1 on failure.
-*/
-static int send_internal (int slave_fd, const char *line, size_t *len)
-{
-    size_t total = 0;
-    size_t bytes_left = *len;
-    ssize_t ret_val;
-
-    for (ret_val = 0; total < *len && ret_val != -1;
-         total += (size_t) ret_val) {
-		/*
-		 * Disable SIGHUP, because a closed connection would generate a 
-		 * send error, which would kill the server process.
-		 */
-        ret_val = send (slave_fd, line + total, bytes_left, MSG_NOSIGNAL);
-        bytes_left -= (size_t) ret_val;
-    }
-    *len = total;
-    return ret_val == -1 ? -1 : 0;
-}
-
-static void send_response (size_t nbytes, const char *line, int sender_fd,
-                           int master_fd, fd_set master, int fd_max)
-{
-    for (int i = 0; i <= fd_max && FD_ISSET (i, &master); i++) {
-        /*
-         * Send it to everyone. 
-         */
-        if (i != master_fd && i != sender_fd && i != pfds[0]) {
-            /*
-             * Excluding the master, sender, and the write end of the pipe. 
-             */
-            size_t len = nbytes;
-
-            if (send_internal (i, line, &len) == -1) {
-                perror ("send()");
-            } else if (len != nbytes) {
-                err_ret (log_fp, LOG_FULLTIME, logs[SS_SEND_ERROR],
-                         PROGRAM_NAME, len);
-            }
-        }
-    }
-}
-
-/** 
-*	\brief	Get the number of bytes that are immediately available for reading.
-*	\param	slave_fd - Socket to peek.	
-*   \return	The number of bytes available, or -1 on failure.
-*/
-static int get_bytes (int slave_fd)
-{
-    int flag = 0;
-
-    if (ioctl (slave_fd, FIONREAD, &flag) == -1) {
-        perror ("ioctl()");
-        return -1;
-    }
-    return flag;
-}
-
-/**
-*	\brief	 Calls recv() in a loop to read as much as available. 	
-*  	\param	 nbytes	  - To store the number of bytes read.
-*  	\param	 slave_fd - The file descriptor to receive from.
-*	\param	 err_code - An out pointer to hold the error code in case of failure.
-
-*  	In case of an error, all allocated memory is freed and err_code
-*  	is set to one of the following:
-* 
-*  	1) SS_NO_MEMORY 	- The system is out of memory.	
-*  	2) SS_CLOSE_CONN 	- There was a recv() or fcntl() error.
-*  	3) SS_WOULD_BLOCK	- The socket has been marked unblocking, but a subsequent
-*					  	  call to recv() would block.
-*
-*  	\return	 A pointer to the line, or NULL on failure.
-*	
-*   \warning The caller is responsible for freeing the returned memory in
-*  			 case of success, else we risk exhaustion.
-*/
-static char *get_response (size_t *nbytes, int slave_fd,
-                           unsigned *err_code)
-{
-    /*
-     * This is an arbitrary limit.
-     * Does anyone know how to do this without a limit? 
-     */
-    const size_t page_size = BUFSIZE;
-    char *buf = 0;
-    int flag = 0;
-    ssize_t ret_val = 0;
-    size_t total = 0;
-	
-    do {
-        if (total > (BUFSIZE * 10)) {
-            /*
-             * Likely a DOS attack.
-             */
-            *err_code = SS_CLOSED_CONN;
-            goto out_free;
-        }
-        char *new = realloc (buf, total + page_size);
-
-        if (!new) {
-            *err_code = SS_NO_MEMORY;
-            perror ("realloc()");
-            goto out_free;
-        }
-        buf = new;
-
-		/*
-		* Disable SIGHUP, because a dropped connection causes a write error, which 
-		* would make server process exit.
-		*/
-        if ((ret_val = recv (slave_fd, buf + total, page_size - 1, MSG_NOSIGNAL)) > 0) {
-            total += (size_t) ret_val;
-            buf[ret_val] = '\0';
-
-            if ((flag = get_bytes (slave_fd)) == -1) {
-                *err_code = SS_CLOSED_CONN;
-                goto out_free;
-            }
-        } else {
-            flag = !flag;
-        }
-    } while (flag > 0);
-
-    if (ret_val == 0) {
-        err_ret (log_fp, LOG_FULLTIME, logs[SS_CLOSED_CONN],
-                 PROGRAM_NAME, slave_fd);
-        *err_code = SS_CLOSED_CONN;
-        goto out_free;
-    }
-    if (ret_val == -1) {
-        if (errno == EWOULDBLOCK || errno == EAGAIN) {
-            *err_code = SS_WOULD_BLOCK;
-            goto out_free;
-        }
-        *err_code = SS_CLOSED_CONN;
-        goto out_free;
-    }
-    *nbytes = total;
-    return buf;
-
-  out_free:
-    free (buf);
-    return 0;
-}
 
 static void excuse_server (int slave_fd)
 {
@@ -369,52 +161,7 @@ static void excuse_server (int slave_fd)
                  PROGRAM_NAME);
     }
 }
-
-static int generate_entry (struct info *const *slaves, int size)
-{
-    for (int i = 0; i < size; i++) {
-        if (slaves[i]->id == -1) {
-            return i;
-        }
-    }
-    /* UNREACHED. */
-    return -1;
-}
-
-static void fill_entry (int slave_fd, int id, int entry,
-                        struct info *const *slaves,
-                        const struct info *client_info)
-{
-    memcpy (slaves[entry]->address, client_info->address,
-            INET6_ADDRSTRLEN);
-    slaves[entry]->id = id;
-    slaves[entry]->sock = slave_fd;
-}
-
-static void clear_entry (int entry, struct info *const *slaves)
-{
-    memset (slaves[entry]->address, 0x00, INET6_ADDRSTRLEN);
-    slaves[entry]->id = -1;
-    slaves[entry]->sock = -1;
-}
-
-static int comp_address (const void *s, const void *t)
-{
-    const struct info *const *p = s;
-    const struct info *const *q = t;
-
-    return memcmp ((*p)->address, (*q)->address, INET6_ADDRSTRLEN);
-}
-
-static int comp_sock (const void *s, const void *t)
-{
-    const struct info *const *p = s;
-    const struct info *const *q = t;
-
-    return ((*p)->sock > (*q)->sock) - ((*p)->sock < (*q)->sock);
-}
-
-static void write_slave_info (int slave_fd, struct info *client_info)
+static void write_slave_info (int slave_fd, struct client_info *client_info)
 {
     struct sockaddr slave_addr = { 0 };
     socklen_t addr_len = sizeof slave_addr;
@@ -444,26 +191,13 @@ static void write_slave_info (int slave_fd, struct info *client_info)
              service, local_ip, slave_fd);
     memcpy (client_info->address, local_ip, sizeof local_ip);
 }
-
-static void init_struct_info (int size, struct info slaves[size],
-                              struct info *p_slaves[size])
-{
-    /*
-     * We will use -1 as the sentinel value.
-     */
-    for (int i = 0; i < size; i++) {
-        slaves[i].id = slaves[i].sock = -1;
-        p_slaves[i] = &slaves[i];
-    }
-}
-
 /**
 *	\brief 	 Accepts a new connection.
 *	\param	 master_fd - The listening server socket.
 *	\param   client_info - To store the slave IP address.
 *	\return	 The slave file descriptor on success, or -1 on failure.
 */
-static int accept_new_connection (int master_fd, struct info *client_info)
+static int accept_new_connection (int master_fd, struct client_info *client_info)
 {
     int slave_fd = 0;
     struct sockaddr slave_addr = { 0 };
@@ -501,21 +235,19 @@ static int read_pipe (void)
 
 static void remove_existing_connection (fd_set * master, int max,
                                         int slave_fd,
-                                        struct info *slave_info,
-                                        struct info *p_slaves[],
+                                        struct client_info *slave_info,
+                                        struct client_info *p_slaves[],
                                         int *n_slaves)
 {
-    const struct info *key;
+    const struct client_info *key;
 
-    for (key = 0;
-         key =
-         ss_search (*n_slaves, p_slaves, &slave_info, comp_address);) {
+    for (key = 0; key = ss_search (*n_slaves, p_slaves, &slave_info, comp_client_address); ) {
         FD_CLR (key->sock, master);
         close_descriptor (key->sock);
-        clear_entry (key->id, p_slaves);
+        clear_client_entry (key->id, p_slaves);
         (*n_slaves)--;
     }
-    fill_entry (slave_fd, generate_entry (p_slaves, max), *n_slaves,
+    fill_client_entry (slave_fd, find_empty_slot (p_slaves, max), *n_slaves,
                 p_slaves, slave_info);
 }
 
@@ -546,10 +278,10 @@ static int handle_connections (int master_fd)
     int fd_max = master_fd;     /* Max file descriptor seen so far. */
     int n_slaves = 0;
 
-    struct info slaves[MAX_SLAVES] = { 0 };
-    struct info *p_slaves[MAX_SLAVES] = { 0 };
+    struct client_info slaves[MAX_SLAVES] = { 0 };
+    struct client_info *p_slaves[MAX_SLAVES] = { 0 };
 
-    init_struct_info (MAX_SLAVES, slaves, p_slaves);
+    init_clients (MAX_SLAVES, slaves, p_slaves);
 
     for (;;) {
         read_fds = master;
@@ -580,7 +312,7 @@ static int handle_connections (int master_fd)
                     /*
                      * It's the master. 
                      */
-                    struct info slave_info = { 0 };
+                    struct client_info slave_info = { 0 };
 
                     int slave_fd =
                         accept_new_connection (master_fd, &slave_info);
@@ -624,16 +356,16 @@ static int handle_connections (int master_fd)
                             return close_log_file ();
                         }
                         if (err_code == SS_CLOSE_CONN) {
-                            struct info slave_info = {.sock = i };
-                            struct info *p_slave_info = &slave_info;
-                            struct info *key =
+                            struct client_info slave_info = {.sock = i };
+                            struct client_info *p_slave_info = &slave_info;
+                            struct client_info *key =
                                 ss_search (n_slaves, p_slaves,
-                                           &p_slave_info, comp_sock);
+                                           &p_slave_info, comp_client_sock);
 
                             if (!key) {
                                 break;
                             }
-                            clear_entry (key->id, p_slaves);
+                            clear_client_entry (key->id, p_slaves);
                             n_slaves--;
                         }
                         FD_CLR (i, &master);
