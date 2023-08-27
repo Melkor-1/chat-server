@@ -44,5 +44,4 @@ enum log_codes {
     SS_INITIATE
 };
 
-
 #endif /* INTERNAL_H */

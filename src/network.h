@@ -19,6 +19,7 @@
 *	\return 0 on success, or -1 on failure.
 */
 int send_internal (int slave_fd, const char *line, size_t *len);
+
 void send_response (size_t nbytes, const char *line, int sender_fd,
                            int master_fd, fd_set master, int fd_max);
 

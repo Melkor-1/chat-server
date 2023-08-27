@@ -12,6 +12,9 @@
 
 #include "log.h"
 
+#include <stdio.h>
+#include <time.h>
+
 #define TS_BUF_LENGTH 50
 
 extern int log_msg (FILE *stream, const char *msg, unsigned flags)
@@ -45,11 +48,9 @@ extern int log_msg (FILE *stream, const char *msg, unsigned flags)
     if (flags & LOG_COUNT) {
         n += snprintf (log, sizeof log, "%lld, ", log_count);
     }
-	// The ISO version is:
-	// %04d-%02d-%02dT%02d:%02d:%02d, year, month, day, hours, minutes, seconds.
-    if (flags & LOG_DATE && tm_info
-        && strftime (date_stamp, TS_BUF_LENGTH, "%F (%a)", tm_info)) {
-        n += snprintf (log + n, sizeof date_stamp, "%s, ", date_stamp);
+	if (flags & LOG_DATE && tm_info
+        && strftime (date_stamp, TS_BUF_LENGTH, "%Y-%m-%dT", tm_info)) {
+        n += snprintf (log + n, sizeof date_stamp, "%s", date_stamp);
     }
     if (flags & LOG_TIME && tm_info
         && strftime (time_stamp, TS_BUF_LENGTH, "%H:%M:%S", tm_info)) {
