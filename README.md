@@ -1,5 +1,7 @@
 # Multi-Person Chat Server
 
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://https://github.com/Melkor-1/chat-server/edit/main/LICENSE)
+
 The Multi-Person Chat Server is a simple chatroom application implemented in C. It allows multiple clients to connect and exchange messages in real-time through a central server.
 
 ## Features
@@ -9,18 +11,6 @@ The Multi-Person Chat Server is a simple chatroom application implemented in C. 
 - **Efficient I/O Multiplexing:** The server uses the `select()` function for efficient handling of multiple client connections.
 - **Graceful Shutdown:** The server handles signals for clean shutdown, ensuring no data loss.
 - **Logging:** A logging system tracks important server events.
-
-## Table of Contents
-
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Compilation](#compilation)
-  - [Usage](#usage)
-- [Configuration](#configuration)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Getting Started
 
 ### Prerequisites
 
@@ -61,19 +51,3 @@ telnet localhost 12345
 Exchange messages between clients in real-time.
 
 To stop the server, use `Ctrl+C` or send a termination signal.
-
-## Configuration
-You can customize the behavior of the chat server by modifying the constants and configurations in the source files. Consider extending the functionality by adding features like private messaging or commands.
-
-## Contributing
-Contributions are welcome! Here's how you can contribute:
-
-Fork the repository.
-Create a new branch for your feature or bug fix: `git checkout -b feature-name`.
-Make your changes and commit them: `git commit -m 'Add some feature'`.
-Push your changes to the branch: `git push origin feature-name`.
-Create a pull request detailing your changes.
-Please ensure your code follows the project's coding conventions and includes appropriate documentation.
-
-## License
-This project is licensed under the MIT License - see the LICENSE file for details.
